@@ -6,7 +6,8 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/polygon_fast_copy.js",
-    "dev": "ts-node polygon_fast_copy.ts"
+    "dev": "ts-node polygon_fast_copy.ts",
+    "check": "node check-config.js"
   },
   "keywords": ["polygon", "copy-trading", "mempool", "ethers"],
   "author": "",

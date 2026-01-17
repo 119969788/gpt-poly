@@ -239,17 +239,52 @@ if (tx.data.startsWith("0x...")) {
 
 ## 📞 问题排查
 
+### 问题：getaddrinfo EAI_AGAIN wss 错误
+
+**错误信息：**
+```
+Error: getaddrinfo EAI_AGAIN wss
+hostname: 'wss'
+```
+
+**原因：** `.env` 文件中的 `RPC_WS` 或 `RPC_HTTP` 配置错误或未正确填写
+
+**解决方法：**
+
+1. **检查配置：**
+   ```bash
+   npm run check
+   ```
+   或手动检查 `.env` 文件
+
+2. **确保配置格式正确：**
+   ```env
+   # ✅ 正确格式
+   RPC_WS=wss://polygon-mainnet.g.alchemy.com/v2/YOUR_ACTUAL_KEY
+   RPC_HTTP=https://polygon-mainnet.g.alchemy.com/v2/YOUR_ACTUAL_KEY
+   
+   # ❌ 错误格式（还是模板值）
+   RPC_WS=wss://polygon-mainnet.g.alchemy.com/v2/你的KEY
+   ```
+
+3. **验证配置：**
+   - `RPC_WS` 必须以 `wss://` 开头
+   - `RPC_HTTP` 必须以 `https://` 开头
+   - 确保替换了所有 "你的KEY" 为真实的 API Key
+
 ### 问题：没有检测到交易
 
 - 检查 WebSocket 连接是否正常
 - 确认目标地址是否正确
 - 检查 RPC 节点是否可用
+- 运行 `npm run check` 检查配置
 
 ### 问题：跟单失败
 
 - 检查是否有足够的 approve
 - 检查钱包余额是否充足
 - 检查 gas 是否设置合理
+- 查看错误日志了解具体原因
 
 ### 问题：交易太慢
 
