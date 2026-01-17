@@ -36,7 +36,29 @@
 
 ## 🚀 快速开始
 
-### 1. 安装依赖
+### 方式一：服务器一键安装（推荐）
+
+```bash
+# 克隆项目
+git clone https://github.com/119969788/gpt-poly.git
+cd gpt-poly
+
+# 一键安装（自动安装 Node.js、依赖、编译等）
+chmod +x install.sh
+./install.sh
+
+# 配置环境变量
+nano .env
+
+# 启动程序
+./start.sh
+```
+
+详细安装说明请参考 [INSTALL.md](./INSTALL.md)
+
+### 方式二：本地开发
+
+#### 1. 安装依赖
 
 ```bash
 npm install
@@ -59,7 +81,7 @@ PRIVATE_KEY=你的私钥
 TARGET=0xe00740bce98a594e26861838885ab310ec3b548c
 ```
 
-### 3. 运行程序
+#### 3. 运行程序
 
 **开发模式（TypeScript）：**
 ```bash
@@ -70,6 +92,14 @@ npm run dev
 ```bash
 npm run build
 npm start
+```
+
+**服务器模式（使用 PM2）：**
+```bash
+./start.sh
+# 或
+pm2 start ecosystem.config.js
+pm2 logs polygon-copy-trading
 ```
 
 ## 🔍 如何验证是否"跑在前面"
