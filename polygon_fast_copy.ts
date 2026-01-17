@@ -92,23 +92,58 @@ try {
   process.exit(1);
 }
 
-// ===== WebSocket 连接状态监听 =====
-// 获取底层 WebSocket 连接（ethers v6）
-const wsConnection = (wsProvider as any)._websocket;
-if (wsConnection) {
-  wsConnection.on("open", () => {
-    console.log("✅ WebSocket 连接已建立 (WS open)");
-  });
-  
-  wsConnection.on("close", (code: number, reason: Buffer) => {
-    console.log(`⚠️  WebSocket 连接关闭 (WS close) - Code: ${code}, Reason: ${reason.toString()}`);
-  });
-  
-  wsConnection.on("error", (err: Error) => {
-    console.log(`❌ WebSocket 连接错误 (WS error):`, err.message);
-  });
-} else {
-  console.log("⚠️  无法访问底层 WebSocket，使用事件监听");
+// ===== WebSocket 连接状态监听（ethers v6 正确方式）=====
+// 方法一：直接监听 WS 底层事件（最可靠）
+try {
+  const ws = (wsProvider as any).websocket || (wsProvider as any)._websocket;
+  if (ws) {
+    // 尝试多种方式访问 WebSocket 事件
+    if (typeof (ws as any).onopen !== 'undefined') {
+      (ws as any).onopen = () => {
+        console.log("✅ WS connected (WebSocket 已连接)");
+      };
+    } else if (typeof ws.addEventListener === 'function') {
+      ws.addEventListener("open", () => {
+        console.log("✅ WS connected (WebSocket 已连接)");
+      });
+    } else if (typeof (ws as any).on === 'function') {
+      (ws as any).on("open", () => {
+        console.log("✅ WS connected (WebSocket 已连接)");
+      });
+    }
+
+    if (typeof (ws as any).onclose !== 'undefined') {
+      (ws as any).onclose = (e: any) => {
+        console.log(`⚠️  WS closed (WebSocket 已关闭) - Code: ${e?.code || 'unknown'}, Reason: ${e?.reason || "无"}`);
+      };
+    } else if (typeof ws.addEventListener === 'function') {
+      ws.addEventListener("close", (e: any) => {
+        console.log(`⚠️  WS closed (WebSocket 已关闭) - Code: ${e?.code || 'unknown'}`);
+      });
+    } else if (typeof (ws as any).on === 'function') {
+      (ws as any).on("close", (code: number) => {
+        console.log(`⚠️  WS closed (WebSocket 已关闭) - Code: ${code}`);
+      });
+    }
+
+    if (typeof (ws as any).onerror !== 'undefined') {
+      (ws as any).onerror = (e: any) => {
+        console.error("❌ WS error (WebSocket 错误):", e?.message || e);
+      };
+    } else if (typeof ws.addEventListener === 'function') {
+      ws.addEventListener("error", (e: any) => {
+        console.error("❌ WS error (WebSocket 错误):", e?.message || e);
+      });
+    } else if (typeof (ws as any).on === 'function') {
+      (ws as any).on("error", (err: Error) => {
+        console.error("❌ WS error (WebSocket 错误):", err.message);
+      });
+    }
+  } else {
+    console.log("⚠️  无法访问 WebSocket 对象，将使用区块监听验证连接");
+  }
+} catch (err: any) {
+  console.log(`⚠️  WebSocket 事件监听设置失败: ${err.message}，将使用区块监听验证连接`);
 }
 
 // 防止重复跟单
@@ -137,30 +172,48 @@ console.log("");
   }
 })();
 
-// ===== 验证区块监听（验证 WebSocket 订阅是否正常）=====
+// ===== 方法二：区块监听（活性检测 - 最简单可靠）=====
+// 能收到新区块 = WS 100% 正常
+// Polygon 每 ~2 秒一次
 wsProvider.on("block", (blockNumber: number) => {
   blockCount++;
   if (blockCount <= 3 || blockCount % 10 === 0) {
-    console.log(`📦 新区块: ${blockNumber} (累计: ${blockCount})`);
+    console.log(`🧱 new block (新区块): ${blockNumber} (累计: ${blockCount})`);
+  }
+  
+  // 如果 10 秒内没有新区块，说明可能有问题
+  if (blockCount === 1) {
+    console.log("✅ 区块监听正常，WebSocket 连接和订阅 OK");
   }
 });
 
-// 定期输出统计信息
+// 定期输出统计信息（方法三的补充）
 setInterval(() => {
   console.log(`\n📊 统计信息 (运行中...):`);
   console.log(`   - Pending 交易数: ${pendingCount}`);
   console.log(`   - 新区块数: ${blockCount}`);
   console.log(`   - 目标地址交易: ${targetTxCount}`);
-  console.log(`   - 成功跟单数: ${copyTxCount}\n`);
-}, 30000); // 每30秒输出一次
+  console.log(`   - 成功跟单数: ${copyTxCount}`);
+  
+  // 诊断信息
+  if (pendingCount === 0 && blockCount > 0) {
+    console.log(`   ⚠️  警告: Pending 计数为 0，但区块正常 → 可能节点不支持 mempool`);
+  } else if (pendingCount === 0 && blockCount === 0) {
+    console.log(`   ❌ 错误: 既没有 Pending 也没有区块 → WebSocket 连接或订阅失败`);
+  } else if (pendingCount > 0) {
+    console.log(`   ✅ Pending 监听正常`);
+  }
+  console.log("");
+}, 5000); // 每5秒输出一次（更频繁，便于诊断）
 
-// ===== 监听 Mempool (Pending) 交易 =====
+// ===== 方法三：检查是否真的在订阅 mempool (pending) =====
+// 这个直接决定"为什么没有跟单"
 wsProvider.on("pending", async (hash: string) => {
   pendingCount++;
   
   // 每 50 个 pending 输出一次（验证是否真的在监听）
   if (pendingCount % 50 === 0) {
-    console.log(`📡 Pending 交易计数: ${pendingCount} (持续监听中...)`);
+    console.log(`⏳ pending tx seen (Pending 交易计数): ${pendingCount}`);
   }
 
   try {
