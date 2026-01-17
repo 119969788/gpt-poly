@@ -92,8 +92,33 @@ try {
   process.exit(1);
 }
 
+// ===== WebSocket 连接状态监听 =====
+// 获取底层 WebSocket 连接（ethers v6）
+const wsConnection = (wsProvider as any)._websocket;
+if (wsConnection) {
+  wsConnection.on("open", () => {
+    console.log("✅ WebSocket 连接已建立 (WS open)");
+  });
+  
+  wsConnection.on("close", (code: number, reason: Buffer) => {
+    console.log(`⚠️  WebSocket 连接关闭 (WS close) - Code: ${code}, Reason: ${reason.toString()}`);
+  });
+  
+  wsConnection.on("error", (err: Error) => {
+    console.log(`❌ WebSocket 连接错误 (WS error):`, err.message);
+  });
+} else {
+  console.log("⚠️  无法访问底层 WebSocket，使用事件监听");
+}
+
 // 防止重复跟单
 const seen = new Set<string>();
+
+// 统计计数器
+let pendingCount = 0;
+let blockCount = 0;
+let targetTxCount = 0;
+let copyTxCount = 0;
 
 console.log("🚀 Polygon mempool copy-trading started…");
 console.log(`👀 监听地址: ${TARGET}`);
@@ -112,47 +137,133 @@ console.log("");
   }
 })();
 
-wsProvider.on("pending", async (hash) => {
-  try {
-    const tx = await wsProvider.getTransaction(hash);
-    if (!tx || !tx.from || !tx.to || !tx.data) return;
+// ===== 验证区块监听（验证 WebSocket 订阅是否正常）=====
+wsProvider.on("block", (blockNumber: number) => {
+  blockCount++;
+  if (blockCount <= 3 || blockCount % 10 === 0) {
+    console.log(`📦 新区块: ${blockNumber} (累计: ${blockCount})`);
+  }
+});
 
-    // 只监听目标地址
+// 定期输出统计信息
+setInterval(() => {
+  console.log(`\n📊 统计信息 (运行中...):`);
+  console.log(`   - Pending 交易数: ${pendingCount}`);
+  console.log(`   - 新区块数: ${blockCount}`);
+  console.log(`   - 目标地址交易: ${targetTxCount}`);
+  console.log(`   - 成功跟单数: ${copyTxCount}\n`);
+}, 30000); // 每30秒输出一次
+
+// ===== 监听 Mempool (Pending) 交易 =====
+wsProvider.on("pending", async (hash: string) => {
+  pendingCount++;
+  
+  // 每 50 个 pending 输出一次（验证是否真的在监听）
+  if (pendingCount % 50 === 0) {
+    console.log(`📡 Pending 交易计数: ${pendingCount} (持续监听中...)`);
+  }
+
+  try {
+    // ===== 重试机制：pending tx 可能一开始查不到 =====
+    let tx: ethers.TransactionResponse | null = null;
+    let retries = 3;
+    let retryDelay = 100; // 100ms
+    
+    while (retries > 0 && !tx) {
+      try {
+        tx = await wsProvider.getTransaction(hash);
+        if (tx) break;
+      } catch (e) {
+        // 忽略错误，继续重试
+      }
+      
+      if (!tx && retries > 1) {
+        await new Promise(resolve => setTimeout(resolve, retryDelay));
+        retryDelay *= 2; // 指数退避
+      }
+      retries--;
+    }
+
+    // 如果还是查不到，跳过
+    if (!tx) return;
+
+    // 基本验证
+    if (!tx.from || !tx.to || !tx.data) return;
+
+    // ===== 过滤：只监听目标地址发出的交易 =====
     if (tx.from.toLowerCase() !== TARGET) return;
 
+    targetTxCount++;
+    console.log(`\n🎯 发现目标地址交易!`);
+    console.log(`   Hash: ${tx.hash}`);
+    console.log(`   From: ${tx.from}`);
+    console.log(`   To: ${tx.to}`);
+    console.log(`   Value: ${ethers.formatEther(tx.value || 0n)} MATIC`);
+    console.log(`   Data: ${tx.data.substring(0, 20)}...`);
+
     // 防重
-    if (seen.has(tx.hash)) return;
+    if (seen.has(tx.hash)) {
+      console.log(`   ⚠️  已处理过，跳过`);
+      return;
+    }
     seen.add(tx.hash);
 
-    console.log("🎯 Target pending tx:", tx.hash);
-
     // ===== Gas 策略（比他高）=====
-    const maxFeePerGas = tx.maxFeePerGas
-      ? tx.maxFeePerGas * 105n / 100n
-      : undefined;
+    // 处理 EIP-1559 和传统 gas 价格
+    let maxFeePerGas: bigint | undefined;
+    let maxPriorityFeePerGas: bigint | undefined;
+    let gasPrice: bigint | undefined;
 
-    const maxPriorityFeePerGas = tx.maxPriorityFeePerGas
-      ? tx.maxPriorityFeePerGas * 120n / 100n
-      : undefined;
+    if (tx.maxFeePerGas && tx.maxPriorityFeePerGas) {
+      // EIP-1559 交易
+      maxFeePerGas = tx.maxFeePerGas * 105n / 100n; // 高 5%
+      maxPriorityFeePerGas = tx.maxPriorityFeePerGas * 120n / 100n; // 高 20%
+      console.log(`   💸 Gas (EIP-1559): maxFee=${ethers.formatUnits(maxFeePerGas, "gwei")} gwei, priority=${ethers.formatUnits(maxPriorityFeePerGas, "gwei")} gwei`);
+    } else if (tx.gasPrice) {
+      // 传统交易
+      gasPrice = tx.gasPrice * 110n / 100n; // 高 10%
+      console.log(`   💸 Gas (Legacy): ${ethers.formatUnits(gasPrice, "gwei")} gwei`);
+    } else {
+      // 如果没有 gas 信息，使用当前网络建议值
+      const feeData = await httpProvider.getFeeData();
+      maxFeePerGas = feeData.maxFeePerGas ? feeData.maxFeePerGas * 110n / 100n : undefined;
+      maxPriorityFeePerGas = feeData.maxPriorityFeePerGas ? feeData.maxPriorityFeePerGas * 120n / 100n : undefined;
+      console.log(`   💸 Gas (自动): maxFee=${maxFeePerGas ? ethers.formatUnits(maxFeePerGas, "gwei") : "auto"} gwei`);
+    }
 
     // ===== 关键：直接复刻 calldata =====
+    console.log(`   🔄 正在构建跟单交易...`);
+    
     const followTx = await wallet.sendTransaction({
       to: tx.to,
-      data: tx.data,     // 完整复制
+      data: tx.data,     // 完整复制 calldata
       value: tx.value ?? 0n,
-      gasLimit: tx.gasLimit ? tx.gasLimit * 120n / 100n : 600_000n,
+      gasLimit: tx.gasLimit ? tx.gasLimit * 120n / 100n : 600_000n, // 留 20% 余量
       maxFeePerGas,
-      maxPriorityFeePerGas
+      maxPriorityFeePerGas,
+      gasPrice
     });
 
-    console.log("✅ FOLLOW TX SENT:", followTx.hash);
+    copyTxCount++;
+    console.log(`\n✅ 跟单交易已发送!`);
     console.log(`   📊 目标交易: ${tx.hash}`);
-    console.log(`   💸 Gas: ${maxFeePerGas ? ethers.formatUnits(maxFeePerGas, "gwei") : "auto"} gwei`);
+    console.log(`   📊 跟单交易: ${followTx.hash}`);
+    console.log(`   💸 Gas: ${maxFeePerGas ? ethers.formatUnits(maxFeePerGas, "gwei") : gasPrice ? ethers.formatUnits(gasPrice, "gwei") : "auto"} gwei`);
+    console.log(`   ⏱️  时间: ${new Date().toLocaleTimeString()}\n`);
 
   } catch (err: any) {
-    // WS 偶发错误直接忽略
-    if (err.code !== "UNPREDICTABLE_GAS_LIMIT" && err.message?.includes("replacement")) {
-      console.error("❌ 跟单失败:", err.message);
+    // 详细错误处理
+    if (err.code === "UNPREDICTABLE_GAS_LIMIT") {
+      // Gas 估算失败，可能是合约调用问题，静默忽略
+      return;
+    } else if (err.message?.includes("replacement") || err.message?.includes("nonce")) {
+      // Nonce 冲突，静默忽略
+      return;
+    } else if (err.message?.includes("insufficient funds")) {
+      console.error(`❌ 跟单失败: 余额不足`);
+    } else {
+      console.error(`❌ 跟单失败: ${err.message}`);
+      if (err.code) console.error(`   错误代码: ${err.code}`);
     }
   }
 });
